@@ -1,6 +1,6 @@
 /*!
- * protobuf.js v6.10.2 (c) 2016, daniel wirtz
- * compiled thu, 10 jun 2021 01:21:19 utc
+ * protobuf.js v7.1.0 (c) 2016, daniel wirtz
+ * compiled thu, 08 sep 2022 23:06:26 utc
  * licensed under the bsd-3-clause license
  * see: https://github.com/dcodeio/protobuf.js for details
  */
@@ -1275,13 +1275,30 @@ function newError(name) {
             merge(this, properties);
     }
 
-    (CustomError.prototype = Object.create(Error.prototype)).constructor = CustomError;
-
-    Object.defineProperty(CustomError.prototype, "name", { get: function() { return name; } });
-
-    CustomError.prototype.toString = function toString() {
-        return this.name + ": " + this.message;
-    };
+    CustomError.prototype = Object.create(Error.prototype, {
+        constructor: {
+            value: CustomError,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+        },
+        name: {
+            get() { return name; },
+            set: undefined,
+            enumerable: false,
+            // configurable: false would accurately preserve the behavior of
+            // the original, but I'm guessing that was not intentional.
+            // For an actual error subclass, this property would
+            // be configurable.
+            configurable: true,
+        },
+        toString: {
+            value() { return this.name + ": " + this.message; },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+        },
+    });
 
     return CustomError;
 }
@@ -3406,6 +3423,9 @@ Field$6.prototype.resolve = function resolve() {
             this.typeDefault = null;
         else // instanceof Enum
             this.typeDefault = this.resolvedType.values[Object.keys(this.resolvedType.values)[0]]; // first defined
+    } else if (this.options && this.options.proto3_optional) {
+        // proto3 scalar value marked optional; should default to null
+        this.typeDefault = null;
     }
 
     // use explicitly set default value if present
@@ -3509,14 +3529,218 @@ Field$6._configure = function configure(Type_) {
     Type$5 = Type_;
 };
 
-var namespace = Namespace$4;
+var oneof = OneOf$4;
 
 // extends ReflectionObject
 var ReflectionObject$4 = object;
-((Namespace$4.prototype = Object.create(ReflectionObject$4.prototype)).constructor = Namespace$4).className = "Namespace";
+((OneOf$4.prototype = Object.create(ReflectionObject$4.prototype)).constructor = OneOf$4).className = "OneOf";
 
-var Field$5    = field,
-    util$e     = util$g.exports;
+var Field$5 = field,
+    util$e  = util$g.exports;
+
+/**
+ * Constructs a new oneof instance.
+ * @classdesc Reflected oneof.
+ * @extends ReflectionObject
+ * @constructor
+ * @param {string} name Oneof name
+ * @param {string[]|Object.<string,*>} [fieldNames] Field names
+ * @param {Object.<string,*>} [options] Declared options
+ * @param {string} [comment] Comment associated with this field
+ */
+function OneOf$4(name, fieldNames, options, comment) {
+    if (!Array.isArray(fieldNames)) {
+        options = fieldNames;
+        fieldNames = undefined;
+    }
+    ReflectionObject$4.call(this, name, options);
+
+    /* istanbul ignore if */
+    if (!(fieldNames === undefined || Array.isArray(fieldNames)))
+        throw TypeError("fieldNames must be an Array");
+
+    /**
+     * Field names that belong to this oneof.
+     * @type {string[]}
+     */
+    this.oneof = fieldNames || []; // toJSON, marker
+
+    /**
+     * Fields that belong to this oneof as an array for iteration.
+     * @type {Field[]}
+     * @readonly
+     */
+    this.fieldsArray = []; // declared readonly for conformance, possibly not yet added to parent
+
+    /**
+     * Comment for this field.
+     * @type {string|null}
+     */
+    this.comment = comment;
+}
+
+/**
+ * Oneof descriptor.
+ * @interface IOneOf
+ * @property {Array.<string>} oneof Oneof field names
+ * @property {Object.<string,*>} [options] Oneof options
+ */
+
+/**
+ * Constructs a oneof from a oneof descriptor.
+ * @param {string} name Oneof name
+ * @param {IOneOf} json Oneof descriptor
+ * @returns {OneOf} Created oneof
+ * @throws {TypeError} If arguments are invalid
+ */
+OneOf$4.fromJSON = function fromJSON(name, json) {
+    return new OneOf$4(name, json.oneof, json.options, json.comment);
+};
+
+/**
+ * Converts this oneof to a oneof descriptor.
+ * @param {IToJSONOptions} [toJSONOptions] JSON conversion options
+ * @returns {IOneOf} Oneof descriptor
+ */
+OneOf$4.prototype.toJSON = function toJSON(toJSONOptions) {
+    var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
+    return util$e.toObject([
+        "options" , this.options,
+        "oneof"   , this.oneof,
+        "comment" , keepComments ? this.comment : undefined
+    ]);
+};
+
+/**
+ * Adds the fields of the specified oneof to the parent if not already done so.
+ * @param {OneOf} oneof The oneof
+ * @returns {undefined}
+ * @inner
+ * @ignore
+ */
+function addFieldsToParent(oneof) {
+    if (oneof.parent)
+        for (var i = 0; i < oneof.fieldsArray.length; ++i)
+            if (!oneof.fieldsArray[i].parent)
+                oneof.parent.add(oneof.fieldsArray[i]);
+}
+
+/**
+ * Adds a field to this oneof and removes it from its current parent, if any.
+ * @param {Field} field Field to add
+ * @returns {OneOf} `this`
+ */
+OneOf$4.prototype.add = function add(field) {
+
+    /* istanbul ignore if */
+    if (!(field instanceof Field$5))
+        throw TypeError("field must be a Field");
+
+    if (field.parent && field.parent !== this.parent)
+        field.parent.remove(field);
+    this.oneof.push(field.name);
+    this.fieldsArray.push(field);
+    field.partOf = this; // field.parent remains null
+    addFieldsToParent(this);
+    return this;
+};
+
+/**
+ * Removes a field from this oneof and puts it back to the oneof's parent.
+ * @param {Field} field Field to remove
+ * @returns {OneOf} `this`
+ */
+OneOf$4.prototype.remove = function remove(field) {
+
+    /* istanbul ignore if */
+    if (!(field instanceof Field$5))
+        throw TypeError("field must be a Field");
+
+    var index = this.fieldsArray.indexOf(field);
+
+    /* istanbul ignore if */
+    if (index < 0)
+        throw Error(field + " is not a member of " + this);
+
+    this.fieldsArray.splice(index, 1);
+    index = this.oneof.indexOf(field.name);
+
+    /* istanbul ignore else */
+    if (index > -1) // theoretical
+        this.oneof.splice(index, 1);
+
+    field.partOf = null;
+    return this;
+};
+
+/**
+ * @override
+ */
+OneOf$4.prototype.onAdd = function onAdd(parent) {
+    ReflectionObject$4.prototype.onAdd.call(this, parent);
+    var self = this;
+    // Collect present fields
+    for (var i = 0; i < this.oneof.length; ++i) {
+        var field = parent.get(this.oneof[i]);
+        if (field && !field.partOf) {
+            field.partOf = self;
+            self.fieldsArray.push(field);
+        }
+    }
+    // Add not yet present fields
+    addFieldsToParent(this);
+};
+
+/**
+ * @override
+ */
+OneOf$4.prototype.onRemove = function onRemove(parent) {
+    for (var i = 0, field; i < this.fieldsArray.length; ++i)
+        if ((field = this.fieldsArray[i]).parent)
+            field.parent.remove(field);
+    ReflectionObject$4.prototype.onRemove.call(this, parent);
+};
+
+/**
+ * Decorator function as returned by {@link OneOf.d} (TypeScript).
+ * @typedef OneOfDecorator
+ * @type {function}
+ * @param {Object} prototype Target prototype
+ * @param {string} oneofName OneOf name
+ * @returns {undefined}
+ */
+
+/**
+ * OneOf decorator (TypeScript).
+ * @function
+ * @param {...string} fieldNames Field names
+ * @returns {OneOfDecorator} Decorator function
+ * @template T extends string
+ */
+OneOf$4.d = function decorateOneOf() {
+    var fieldNames = new Array(arguments.length),
+        index = 0;
+    while (index < arguments.length)
+        fieldNames[index] = arguments[index++];
+    return function oneOfDecorator(prototype, oneofName) {
+        util$e.decorateType(prototype.constructor)
+            .add(new OneOf$4(oneofName, fieldNames));
+        Object.defineProperty(prototype, oneofName, {
+            get: util$e.oneOfGetter(fieldNames),
+            set: util$e.oneOfSetter(fieldNames)
+        });
+    };
+};
+
+var namespace = Namespace$4;
+
+// extends ReflectionObject
+var ReflectionObject$3 = object;
+((Namespace$4.prototype = Object.create(ReflectionObject$3.prototype)).constructor = Namespace$4).className = "Namespace";
+
+var Field$4    = field,
+    util$d     = util$g.exports,
+    OneOf$3    = oneof;
 
 var Type$4,    // cyclic
     Service$3,
@@ -3603,7 +3827,7 @@ Namespace$4.isReservedName = function isReservedName(reserved, name) {
  * @see {@link Namespace}
  */
 function Namespace$4(name, options) {
-    ReflectionObject$4.call(this, name, options);
+    ReflectionObject$3.call(this, name, options);
 
     /**
      * Nested objects by name.
@@ -3632,7 +3856,7 @@ function clearCache$2(namespace) {
  */
 Object.defineProperty(Namespace$4.prototype, "nestedArray", {
     get: function() {
-        return this._nestedArray || (this._nestedArray = util$e.toArray(this.nested));
+        return this._nestedArray || (this._nestedArray = util$d.toArray(this.nested));
     }
 });
 
@@ -3662,7 +3886,7 @@ Object.defineProperty(Namespace$4.prototype, "nestedArray", {
  * @returns {INamespace} Namespace descriptor
  */
 Namespace$4.prototype.toJSON = function toJSON(toJSONOptions) {
-    return util$e.toObject([
+    return util$d.toObject([
         "options" , this.options,
         "nested"  , arrayToJSON(this.nestedArray, toJSONOptions)
     ]);
@@ -3687,7 +3911,7 @@ Namespace$4.prototype.addJSON = function addJSON(nestedJson) {
                 : nested.methods !== undefined
                 ? Service$3.fromJSON
                 : nested.id !== undefined
-                ? Field$5.fromJSON
+                ? Field$4.fromJSON
                 : Namespace$4.fromJSON )(names[i], nested)
             );
         }
@@ -3727,7 +3951,7 @@ Namespace$4.prototype.getEnum = function getEnum(name) {
  */
 Namespace$4.prototype.add = function add(object) {
 
-    if (!(object instanceof Field$5 && object.extend !== undefined || object instanceof Type$4 || object instanceof Enum$8 || object instanceof Service$3 || object instanceof Namespace$4))
+    if (!(object instanceof Field$4 && object.extend !== undefined || object instanceof Type$4  || object instanceof OneOf$3 || object instanceof Enum$8 || object instanceof Service$3 || object instanceof Namespace$4))
         throw TypeError("object must be a valid nested object");
 
     if (!this.nested)
@@ -3763,7 +3987,7 @@ Namespace$4.prototype.add = function add(object) {
  */
 Namespace$4.prototype.remove = function remove(object) {
 
-    if (!(object instanceof ReflectionObject$4))
+    if (!(object instanceof ReflectionObject$3))
         throw TypeError("object must be a ReflectionObject");
     if (object.parent !== this)
         throw Error(object + " is not a member of " + this);
@@ -3784,7 +4008,7 @@ Namespace$4.prototype.remove = function remove(object) {
  */
 Namespace$4.prototype.define = function define(path, json) {
 
-    if (util$e.isString(path))
+    if (util$d.isString(path))
         path = path.split(".");
     else if (!Array.isArray(path))
         throw TypeError("illegal path");
@@ -3836,7 +4060,7 @@ Namespace$4.prototype.lookup = function lookup(path, filterTypes, parentAlreadyC
     } else if (filterTypes && !Array.isArray(filterTypes))
         filterTypes = [ filterTypes ];
 
-    if (util$e.isString(path) && path.length) {
+    if (util$d.isString(path) && path.length) {
         if (path === ".")
             return this.root;
         path = path.split(".");
@@ -3940,209 +4164,6 @@ Namespace$4._configure = function(Type_, Service_, Enum_) {
     Type$4    = Type_;
     Service$3 = Service_;
     Enum$8    = Enum_;
-};
-
-var oneof = OneOf$3;
-
-// extends ReflectionObject
-var ReflectionObject$3 = object;
-((OneOf$3.prototype = Object.create(ReflectionObject$3.prototype)).constructor = OneOf$3).className = "OneOf";
-
-var Field$4 = field,
-    util$d  = util$g.exports;
-
-/**
- * Constructs a new oneof instance.
- * @classdesc Reflected oneof.
- * @extends ReflectionObject
- * @constructor
- * @param {string} name Oneof name
- * @param {string[]|Object.<string,*>} [fieldNames] Field names
- * @param {Object.<string,*>} [options] Declared options
- * @param {string} [comment] Comment associated with this field
- */
-function OneOf$3(name, fieldNames, options, comment) {
-    if (!Array.isArray(fieldNames)) {
-        options = fieldNames;
-        fieldNames = undefined;
-    }
-    ReflectionObject$3.call(this, name, options);
-
-    /* istanbul ignore if */
-    if (!(fieldNames === undefined || Array.isArray(fieldNames)))
-        throw TypeError("fieldNames must be an Array");
-
-    /**
-     * Field names that belong to this oneof.
-     * @type {string[]}
-     */
-    this.oneof = fieldNames || []; // toJSON, marker
-
-    /**
-     * Fields that belong to this oneof as an array for iteration.
-     * @type {Field[]}
-     * @readonly
-     */
-    this.fieldsArray = []; // declared readonly for conformance, possibly not yet added to parent
-
-    /**
-     * Comment for this field.
-     * @type {string|null}
-     */
-    this.comment = comment;
-}
-
-/**
- * Oneof descriptor.
- * @interface IOneOf
- * @property {Array.<string>} oneof Oneof field names
- * @property {Object.<string,*>} [options] Oneof options
- */
-
-/**
- * Constructs a oneof from a oneof descriptor.
- * @param {string} name Oneof name
- * @param {IOneOf} json Oneof descriptor
- * @returns {OneOf} Created oneof
- * @throws {TypeError} If arguments are invalid
- */
-OneOf$3.fromJSON = function fromJSON(name, json) {
-    return new OneOf$3(name, json.oneof, json.options, json.comment);
-};
-
-/**
- * Converts this oneof to a oneof descriptor.
- * @param {IToJSONOptions} [toJSONOptions] JSON conversion options
- * @returns {IOneOf} Oneof descriptor
- */
-OneOf$3.prototype.toJSON = function toJSON(toJSONOptions) {
-    var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
-    return util$d.toObject([
-        "options" , this.options,
-        "oneof"   , this.oneof,
-        "comment" , keepComments ? this.comment : undefined
-    ]);
-};
-
-/**
- * Adds the fields of the specified oneof to the parent if not already done so.
- * @param {OneOf} oneof The oneof
- * @returns {undefined}
- * @inner
- * @ignore
- */
-function addFieldsToParent(oneof) {
-    if (oneof.parent)
-        for (var i = 0; i < oneof.fieldsArray.length; ++i)
-            if (!oneof.fieldsArray[i].parent)
-                oneof.parent.add(oneof.fieldsArray[i]);
-}
-
-/**
- * Adds a field to this oneof and removes it from its current parent, if any.
- * @param {Field} field Field to add
- * @returns {OneOf} `this`
- */
-OneOf$3.prototype.add = function add(field) {
-
-    /* istanbul ignore if */
-    if (!(field instanceof Field$4))
-        throw TypeError("field must be a Field");
-
-    if (field.parent && field.parent !== this.parent)
-        field.parent.remove(field);
-    this.oneof.push(field.name);
-    this.fieldsArray.push(field);
-    field.partOf = this; // field.parent remains null
-    addFieldsToParent(this);
-    return this;
-};
-
-/**
- * Removes a field from this oneof and puts it back to the oneof's parent.
- * @param {Field} field Field to remove
- * @returns {OneOf} `this`
- */
-OneOf$3.prototype.remove = function remove(field) {
-
-    /* istanbul ignore if */
-    if (!(field instanceof Field$4))
-        throw TypeError("field must be a Field");
-
-    var index = this.fieldsArray.indexOf(field);
-
-    /* istanbul ignore if */
-    if (index < 0)
-        throw Error(field + " is not a member of " + this);
-
-    this.fieldsArray.splice(index, 1);
-    index = this.oneof.indexOf(field.name);
-
-    /* istanbul ignore else */
-    if (index > -1) // theoretical
-        this.oneof.splice(index, 1);
-
-    field.partOf = null;
-    return this;
-};
-
-/**
- * @override
- */
-OneOf$3.prototype.onAdd = function onAdd(parent) {
-    ReflectionObject$3.prototype.onAdd.call(this, parent);
-    var self = this;
-    // Collect present fields
-    for (var i = 0; i < this.oneof.length; ++i) {
-        var field = parent.get(this.oneof[i]);
-        if (field && !field.partOf) {
-            field.partOf = self;
-            self.fieldsArray.push(field);
-        }
-    }
-    // Add not yet present fields
-    addFieldsToParent(this);
-};
-
-/**
- * @override
- */
-OneOf$3.prototype.onRemove = function onRemove(parent) {
-    for (var i = 0, field; i < this.fieldsArray.length; ++i)
-        if ((field = this.fieldsArray[i]).parent)
-            field.parent.remove(field);
-    ReflectionObject$3.prototype.onRemove.call(this, parent);
-};
-
-/**
- * Decorator function as returned by {@link OneOf.d} (TypeScript).
- * @typedef OneOfDecorator
- * @type {function}
- * @param {Object} prototype Target prototype
- * @param {string} oneofName OneOf name
- * @returns {undefined}
- */
-
-/**
- * OneOf decorator (TypeScript).
- * @function
- * @param {...string} fieldNames Field names
- * @returns {OneOfDecorator} Decorator function
- * @template T extends string
- */
-OneOf$3.d = function decorateOneOf() {
-    var fieldNames = new Array(arguments.length),
-        index = 0;
-    while (index < arguments.length)
-        fieldNames[index] = arguments[index++];
-    return function oneOfDecorator(prototype, oneofName) {
-        util$d.decorateType(prototype.constructor)
-            .add(new OneOf$3(oneofName, fieldNames));
-        Object.defineProperty(prototype, oneofName, {
-            get: util$d.oneOfGetter(fieldNames),
-            set: util$d.oneOfSetter(fieldNames)
-        });
-    };
 };
 
 var mapfield = MapField$2;
@@ -4769,7 +4790,7 @@ function decoder$1(mtype) {
         var field = mtype._fieldsArray[i].resolve(),
             type  = field.resolvedType instanceof Enum$7 ? "int32" : field.type,
             ref   = "m" + util$8.safeProp(field.name); gen
-            ("case %i:", field.id);
+            ("case %i: {", field.id);
 
         // Map fields
         if (field.map) { gen
@@ -4840,8 +4861,9 @@ function decoder$1(mtype) {
         else gen
                 ("%s=r.%s()", ref, type);
         gen
-                ("break");
-    // Unknown fields
+                ("break")
+            ("}");
+        // Unknown fields
     } gen
             ("default:")
                 ("r.skipType(t&7)")
@@ -5067,8 +5089,14 @@ function genValuePartial_fromObject(gen, field, fieldIndex, prop) {
         if (field.resolvedType instanceof Enum) { gen
             ("switch(d%s){", prop);
             for (var values = field.resolvedType.values, keys = Object.keys(values), i = 0; i < keys.length; ++i) {
-                if (field.repeated && values[keys[i]] === field.typeDefault) gen
-                ("default:");
+                // enum unknown values passthrough
+                if (values[keys[i]] === field.typeDefault) { gen
+                    ("default:")
+                        ("if(typeof(d%s)===\"number\"){m%s=d%s;break}", prop, prop, prop);
+                    if (!field.repeated) gen // fallback to default value only for
+                                             // arrays, to avoid leaving holes.
+                        ("break");           // for non-repeated fields, just ignore
+                }
                 gen
                 ("case%j:", keys[i])
                 ("case %i:", values[keys[i]])
@@ -5200,7 +5228,7 @@ function genValuePartial_toObject(gen, field, fieldIndex, prop) {
     /* eslint-disable no-unexpected-multiline, block-scoped-var, no-redeclare */
     if (field.resolvedType) {
         if (field.resolvedType instanceof Enum) gen
-            ("d%s=o.enums===String?types[%i].values[m%s]:m%s", prop, fieldIndex, prop, prop);
+            ("d%s=o.enums===String?(types[%i].values[m%s]===undefined?m%s:types[%i].values[m%s]):m%s", prop, fieldIndex, prop, prop, fieldIndex, prop, prop);
         else gen
             ("d%s=types[%i].toObject(m%s,o)", prop, fieldIndex, prop);
     } else {
@@ -5390,7 +5418,7 @@ wrappers[".google.protobuf.Any"] = {
             if (type) {
                 // type_url does not accept leading "."
                 var type_url = object["@type"].charAt(0) === "." ?
-                    object["@type"].substr(1) : object["@type"];
+                    object["@type"].slice(1) : object["@type"];
                 // type_url prefix is optional, but path seperator is required
                 if (type_url.indexOf("/") === -1) {
                     type_url = "/" + type_url;
@@ -5428,7 +5456,7 @@ wrappers[".google.protobuf.Any"] = {
         if (!(message instanceof this.ctor) && message instanceof Message) {
             var object = message.$type.toObject(message, options);
             var messageName = message.$type.fullName[0] === "." ?
-                message.$type.fullName.substr(1) : message.$type.fullName;
+                message.$type.fullName.slice(1) : message.$type.fullName;
             // Default to type.googleapis.com prefix if no prefix is used
             if (prefix === "") {
                 prefix = googleApi;
@@ -6571,6 +6599,9 @@ util$4.decorateEnum = function decorateEnum(object) {
 util$4.setProperty = function setProperty(dst, path, value) {
     function setProp(dst, path, value) {
         var part = path.shift();
+        if (part === "__proto__") {
+          return dst;
+        }
         if (path.length > 0) {
             dst[part] = setProp(dst[part] || {}, path, value);
         } else {
@@ -6865,8 +6896,9 @@ var Namespace = namespace,
  * @param {Object.<string,*>} [options] Declared options
  * @param {string} [comment] The comment for this enum
  * @param {Object.<string,string>} [comments] The value comments for this enum
+ * @param {Object.<string,Object<string,*>>|undefined} [valuesOptions] The value options for this enum
  */
-function Enum$2(name, values, options, comment, comments) {
+function Enum$2(name, values, options, comment, comments, valuesOptions) {
     ReflectionObject.call(this, name, options);
 
     if (values && typeof values !== "object")
@@ -6895,6 +6927,12 @@ function Enum$2(name, values, options, comment, comments) {
      * @type {Object.<string,string>}
      */
     this.comments = comments || {};
+
+    /**
+     * Values options, if any
+     * @type {Object<string, Object<string, *>>|undefined}
+     */
+    this.valuesOptions = valuesOptions;
 
     /**
      * Reserved ranges, if any.
@@ -6940,11 +6978,12 @@ Enum$2.fromJSON = function fromJSON(name, json) {
 Enum$2.prototype.toJSON = function toJSON(toJSONOptions) {
     var keepComments = toJSONOptions ? Boolean(toJSONOptions.keepComments) : false;
     return util$2.toObject([
-        "options"  , this.options,
-        "values"   , this.values,
-        "reserved" , this.reserved && this.reserved.length ? this.reserved : undefined,
-        "comment"  , keepComments ? this.comment : undefined,
-        "comments" , keepComments ? this.comments : undefined
+        "options"       , this.options,
+        "valuesOptions" , this.valuesOptions,
+        "values"        , this.values,
+        "reserved"      , this.reserved && this.reserved.length ? this.reserved : undefined,
+        "comment"       , keepComments ? this.comment : undefined,
+        "comments"      , keepComments ? this.comments : undefined
     ]);
 };
 
@@ -6953,11 +6992,12 @@ Enum$2.prototype.toJSON = function toJSON(toJSONOptions) {
  * @param {string} name Value name
  * @param {number} id Value id
  * @param {string} [comment] Comment, if any
+ * @param {Object.<string, *>|undefined} [options] Options, if any
  * @returns {Enum} `this`
  * @throws {TypeError} If arguments are invalid
  * @throws {Error} If there is already a value with this name or id
  */
-Enum$2.prototype.add = function add(name, id, comment) {
+Enum$2.prototype.add = function add(name, id, comment, options) {
     // utilized by the parser but not by .fromJSON
 
     if (!util$2.isString(name))
@@ -6982,6 +7022,12 @@ Enum$2.prototype.add = function add(name, id, comment) {
     } else
         this.valuesById[this.values[name] = id] = name;
 
+    if (options) {
+        if (this.valuesOptions === undefined)
+            this.valuesOptions = {};
+        this.valuesOptions[name] = options || null;
+    }
+
     this.comments[name] = comment || null;
     return this;
 };
@@ -7005,6 +7051,8 @@ Enum$2.prototype.remove = function remove(name) {
     delete this.valuesById[val];
     delete this.values[name];
     delete this.comments[name];
+    if (this.valuesOptions)
+        delete this.valuesOptions[name];
 
     return this;
 };
@@ -8093,6 +8141,14 @@ function parse(source, root, options) {
                     }
                     break;
 
+                case "message":
+                    parseType(type, token);
+                    break;
+
+                case "enum":
+                    parseEnum(type, token);
+                    break;
+
                 /* istanbul ignore next */
                 default:
                     throw illegal(token); // there are no groups with proto3 semantics
@@ -8193,7 +8249,14 @@ function parse(source, root, options) {
 
         skip("=");
         var value = parseId(next(), true),
-            dummy = {};
+            dummy = {
+                options: undefined
+            };
+        dummy.setOption = function(name, value) {
+            if (this.options === undefined)
+                this.options = {};
+            this.options[name] = value;
+        };
         ifBlock(dummy, function parseEnumValue_block(token) {
 
             /* istanbul ignore else */
@@ -8206,7 +8269,7 @@ function parse(source, root, options) {
         }, function parseEnumValue_line() {
             parseInlineOptions(dummy); // skip
         });
-        parent.add(token, value, dummy.comment);
+        parent.add(token, value, dummy.comment, dummy.options);
     }
 
     function parseOption(parent, token) {
@@ -8226,7 +8289,7 @@ function parse(source, root, options) {
             option = name;
             token = peek();
             if (fqTypeRefRe.test(token)) {
-                propName = token.substr(1); //remove '.' before property name
+                propName = token.slice(1); //remove '.' before property name
                 name += token;
                 next();
             }
@@ -8237,49 +8300,57 @@ function parse(source, root, options) {
     }
 
     function parseOptionValue(parent, name) {
-        if (skip("{", true)) { // { a: "foo" b { c: "bar" } }
-            var result = {};
+        // { a: "foo" b { c: "bar" } }
+        if (skip("{", true)) {
+            var objectResult = {};
+
             while (!skip("}", true)) {
                 /* istanbul ignore if */
-                if (!nameRe.test(token = next()))
+                if (!nameRe.test(token = next())) {
                     throw illegal(token, "name");
+                }
 
                 var value;
                 var propName = token;
+
+                skip(":", true);
+
                 if (peek() === "{")
                     value = parseOptionValue(parent, name + "." + token);
-                else {
-                    skip(":");
-                    if (peek() === "{")
-                        value = parseOptionValue(parent, name + "." + token);
-                    else if (peek() === "[") {
-                        // option (my_option) = {
-                        //     repeated_value: [ "foo", "bar" ]
-                        // };
-                        value = [];
-                        var lastValue;
-                        if (skip("[", true)) {
-                            do {
-                                lastValue = readValue(true);
-                                value.push(lastValue);
-                            } while (skip(",", true));
-                            skip("]");
-                            if (typeof lastValue !== "undefined") {
-                                setOption(parent, name + "." + token, lastValue);
-                            }
+                else if (peek() === "[") {
+                    // option (my_option) = {
+                    //     repeated_value: [ "foo", "bar" ]
+                    // };
+                    value = [];
+                    var lastValue;
+                    if (skip("[", true)) {
+                        do {
+                            lastValue = readValue(true);
+                            value.push(lastValue);
+                        } while (skip(",", true));
+                        skip("]");
+                        if (typeof lastValue !== "undefined") {
+                            setOption(parent, name + "." + token, lastValue);
                         }
-                    } else {
-                        value = readValue(true);
-                        setOption(parent, name + "." + token, value);
                     }
+                } else {
+                    value = readValue(true);
+                    setOption(parent, name + "." + token, value);
                 }
-                var prevValue = result[propName];
+
+                var prevValue = objectResult[propName];
+
                 if (prevValue)
                     value = [].concat(prevValue).concat(value);
-                result[propName] = value;
-                skip(",", true) || skip(";", true);
+
+                objectResult[propName] = value;
+
+                // Semicolons and commas can be optional
+                skip(",", true);
+                skip(";", true);
             }
-            return result;
+
+            return objectResult;
         }
 
         var simpleValue = readValue(true);
@@ -8886,6 +8957,6 @@ protobuf.Root._configure(protobuf.Type, protobuf.parse, protobuf.common);
 
 var src = src$1.exports;
 
-export default src;
+export { src as default };
 
 //# sourceMappingURL=protobuf.js.map

@@ -1,6 +1,6 @@
 /*!
- * protobuf.js v6.10.2 (c) 2016, daniel wirtz
- * compiled thu, 10 jun 2021 01:21:18 utc
+ * protobuf.js v7.1.0 (c) 2016, daniel wirtz
+ * compiled thu, 08 sep 2022 23:06:26 utc
  * licensed under the bsd-3-clause license
  * see: https://github.com/dcodeio/protobuf.js for details
  */
@@ -1271,13 +1271,30 @@ function newError(name) {
             merge(this, properties);
     }
 
-    (CustomError.prototype = Object.create(Error.prototype)).constructor = CustomError;
-
-    Object.defineProperty(CustomError.prototype, "name", { get: function() { return name; } });
-
-    CustomError.prototype.toString = function toString() {
-        return this.name + ": " + this.message;
-    };
+    CustomError.prototype = Object.create(Error.prototype, {
+        constructor: {
+            value: CustomError,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+        },
+        name: {
+            get() { return name; },
+            set: undefined,
+            enumerable: false,
+            // configurable: false would accurately preserve the behavior of
+            // the original, but I'm guessing that was not intentional.
+            // For an actual error subclass, this property would
+            // be configurable.
+            configurable: true,
+        },
+        toString: {
+            value() { return this.name + ": " + this.message; },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+        },
+    });
 
     return CustomError;
 }
@@ -2646,6 +2663,6 @@ function configure() {
 configure();
 }(indexMinimal));
 
-export default indexMinimal;
+export { indexMinimal as default };
 
 //# sourceMappingURL=protobuf.js.map
